@@ -1,0 +1,75 @@
+import subprocess
+import os
+import multiprocessing
+import shutil
+from pathlib import Path
+from mods import colors
+
+def get_env():
+    env = os.environ.copy()
+    # Path to our host-built LLVM tools
+    project_root = Path(__file__).parent.parent.parent
+    host_bin = project_root / "bld" / "host" / "bin"
+    env["PATH"] = f"{host_bin}:{env.get('PATH', '')}"
+    return env
+
+def target_configure(staging_dir: Path, target_dir: Path, arch="x32"):
+    colors.info(f"Dropbear: target_configure ({arch})")
+    repo_root = Path(__file__).parent
+    
+    # Generate configure script if it doesn't exist
+    if not (repo_root / "configure").exists():
+        colors.info("Dropbear: running autoreconf...")
+        subprocess.run(["autoreconf", "-fi"], cwd=repo_root, env=get_env(), check=True)
+
+    std_flags = os.environ.get("CFLAGS", "")
+    static_flags = os.environ.get("CFLAGS_STATIC", std_flags)
+    
+    host_triple = {
+        "x32": "x86_64-linux-muslx32",
+        "x86_64": "x86_64-linux-musl",
+        "aarch64": "aarch64-linux-musl",
+        "riscv64": "riscv64-linux-musl",
+    }.get(arch, "x86_64-linux-musl")
+
+    cmd = [
+        "./configure",
+        f"--host={host_triple}",
+        "--prefix=/usr",
+        "--disable-zlib",
+        "--disable-lastlog",
+        "--disable-utmp",
+        "--disable-utmpx",
+        "--disable-wtmp",
+        "--disable-wtmpx",
+        f"CC=clang {std_flags}",
+        f"LDFLAGS={static_flags}",
+    ]
+    
+    subprocess.run(cmd, cwd=repo_root, env=get_env(), check=True)
+
+def target_build(staging_dir: Path, target_dir: Path, arch="x32"):
+    colors.info(f"Dropbear: target_build")
+    repo_root = Path(__file__).parent
+    make_jobs = multiprocessing.cpu_count()
+    # Build multi-binary including common tools
+    programs = "dropbear dbclient dropbearkey dropbearconvert scp"
+    subprocess.run(["make", f"-j{make_jobs}", f"PROGRAMS={programs}", "MULTI=1"], cwd=repo_root, env=get_env(), check=True)
+
+def target_install(staging_dir: Path, target_dir: Path, arch="x32"):
+    colors.info(f"Dropbear: target_install")
+    repo_root = Path(__file__).parent
+    
+    programs = "dropbear dbclient dropbearkey dropbearconvert scp"
+    
+    # Install to staging
+    colors.info(f"Dropbear: installing to staging {staging_dir}")
+    subprocess.run(["make", f"DESTDIR={staging_dir}", f"PROGRAMS={programs}", "MULTI=1", "install"], cwd=repo_root, env=get_env(), check=True)
+    
+    # Install to target
+    colors.info(f"Dropbear: installing to target {target_dir}")
+    subprocess.run(["make", f"DESTDIR={target_dir}", f"PROGRAMS={programs}", "MULTI=1", "install"], cwd=repo_root, env=get_env(), check=True)
+    
+    # Prune target image
+    colors.info(f"Dropbear: pruning development files and documentation from target...")
+    shutil.rmtree(target_dir / "usr" / "share" / "man", ignore_errors=True)
